@@ -67,11 +67,11 @@ ZIPNAME="HydrogenKernel-${DEVICE}-${DATE}.zip"
 echo -e "\nBuilding for device: $DEVICE\n"
 
 # Toolchain Setup
-CLANG_VERSION="clang-r547379"
+CLANG_VERSION="clang-r530567b"
 TC_DIR="$HOME/toolchains"
 if [ ! -d "$TC_DIR/$CLANG_VERSION" ]; then
     echo -e "Toolchain not found, downloading AOSP clang...\n"
-    git clone --depth=1 --branch=android16-release https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 "$TC_DIR/.temp"
+    git clone --depth=1 --branch=android15-qpr2-release https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 "$TC_DIR/.temp"
     mv "$TC_DIR/.temp/$CLANG_VERSION" "$TC_DIR"
     rm -rf "$TC_DIR/.temp"
     echo -e "\nToolchain successfully downloaded and extracted!\n"
