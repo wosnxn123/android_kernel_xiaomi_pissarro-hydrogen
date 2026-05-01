@@ -31,5 +31,6 @@ obj-$(CONFIG_CPU_FREQ) += cpufreq.o
 obj-$(CONFIG_CPU_FREQ_GOV_SCHEDUTIL) += cpufreq_schedutil.o
 obj-$(CONFIG_CPU_FREQ_GOV_HYDROGENX) += cpufreq_hydrogen_schedutil.o
 obj-$(CONFIG_CPU_FREQ_GOV_HYDROGENX) += hydrogenx_boost.o hydrogenx_canary.o
+obj-$(CONFIG_CPU_FREQ_GOV_HYDROGENX) += hydrogenx_sched_bridge.o
 obj-$(CONFIG_MEMBARRIER) += membarrier.o
 obj-$(CONFIG_PSI) += psi.o
