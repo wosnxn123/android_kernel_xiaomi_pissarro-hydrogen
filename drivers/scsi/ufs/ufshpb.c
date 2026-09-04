@@ -730,7 +730,7 @@ int ufshpb_prepare_pre_req(struct ufsf_feature *ufsf, struct scsi_cmnd *cmd,
 	if (unlikely(ret))
 		return ret;
 
-	if (hpb->force_disable) {
+	if (hpb->force_disable || !hpb->pre_req) {
 		ret = -ENODEV;
 		goto put_hpb;
 	}
@@ -1231,14 +1231,6 @@ static int ufshpb_map_req_error(struct ufshpb_req *map_req)
 	return 0;
 }
 
-#ifdef CONFIG_PM
-static inline void ufshpb_mimic_blk_pm_put_request(struct request *rq)
-{
-	if (rq->q->dev && !(rq->rq_flags & RQF_PM) && !--rq->q->nr_pending)
-		pm_runtime_mark_last_busy(rq->q->dev);
-}
-#endif
-
 /* routine : map_req compl */
 static void ufshpb_map_req_compl_fn(struct request *req, blk_status_t error)
 {
@@ -1247,9 +1239,10 @@ static void ufshpb_map_req_compl_fn(struct request *req, blk_status_t error)
 	unsigned long flags;
 	int ret;
 
-#ifdef CONFIG_PM
-	ufshpb_mimic_blk_pm_put_request(req);
-#endif
+	memcpy(map_req->sense, scsi_req(req)->sense, SCSI_SENSE_BUFFERSIZE);
+	req->bio = NULL;
+	__blk_put_request(req->q, req);
+
 	if (ufshpb_get_state(hpb->ufsf) == HPB_FAILED)
 		goto free_map_req;
 
@@ -1321,7 +1314,6 @@ static int ufshpb_execute_map_req(struct ufshpb_lu *hpb,
 	struct scsi_device *sdev;
 	struct request_queue *q;
 	struct request *req;
-	struct scsi_cmnd *scmd;
 	struct bio *bio = map_req->bio;
 	struct scsi_request *rq;
 	int ret = 0;
@@ -1344,25 +1336,16 @@ static int ufshpb_execute_map_req(struct ufshpb_lu *hpb,
 		return ret;
 	}
 
-	req = map_req->req;
-
-	/*
-	 * blk_init_rl() -> alloc_request_size().
-	 * q->init_rq_fn = scsi_old_init_rq behavior.
-	 */
-	scmd = (struct scsi_cmnd *)(req + 1);
-	memset(scmd, 0, sizeof(*scmd));
-	scmd->sense_buffer = map_req->sense;
-	scmd->req.sense = scmd->sense_buffer;
-
-	/* blk_get_request behavior */
-	blk_rq_init(q, req);
-	q->initialize_rq_fn(req);
+	req = blk_get_request(q, REQ_OP_SCSI_IN, GFP_KERNEL);
+	if (IS_ERR(req)) {
+		ERR_MSG("cannot get request (%ld)", PTR_ERR(req));
+		scsi_device_put(sdev);
+		return -EIO;
+	}
 
 	/* 1. request setup */
 	blk_rq_append_bio(req, &bio); /* req->__data_len is setted */
-	req->cmd_flags = REQ_OP_READ | REQ_OP_SCSI_IN;
-	req->rq_flags = RQF_QUIET | RQF_PREEMPT;
+	req->rq_flags |= RQF_QUIET | RQF_PREEMPT;
 	req->timeout = msecs_to_jiffies(30000);
 	req->end_io_data = (void *)map_req;
 
@@ -2354,10 +2337,8 @@ static inline void ufshpb_map_req_mempool_remove(struct ufshpb_lu *hpb)
 {
 	int i;
 
-	for (i = 0; i < hpb->qd; i++) {
-		kfree(hpb->map_req[i].req);
+	for (i = 0; i < hpb->qd; i++)
 		bio_put(hpb->map_req[i].bio);
-	}
 
 	kfree(hpb->map_req);
 }
@@ -2365,6 +2346,9 @@ static inline void ufshpb_map_req_mempool_remove(struct ufshpb_lu *hpb)
 static inline void ufshpb_pre_req_mempool_remove(struct ufshpb_lu *hpb)
 {
 	int i;
+
+	if (!hpb->pre_req)
+		return;
 
 	for (i = 0; i < hpb->qd; i++) {
 		kfree(hpb->pre_req[i].req);
@@ -2550,14 +2534,9 @@ release_mem:
 
 static int ufshpb_map_req_mempool_init(struct ufshpb_lu *hpb)
 {
-	struct scsi_device *sdev;
-	struct request_queue *q;
 	struct ufshpb_req *map_req = NULL;
 	int qd = hpb->qd;
 	int i, j;
-
-	sdev = hpb->ufsf->sdev_ufs_lu[hpb->lun];
-	q = sdev->request_queue;
 
 	INIT_LIST_HEAD(&hpb->lh_map_req_free);
 	INIT_LIST_HEAD(&hpb->lh_map_req_retry);
@@ -2566,29 +2545,14 @@ static int ufshpb_map_req_mempool_init(struct ufshpb_lu *hpb)
 	if (!hpb->map_req)
 		goto release_mem;
 
-	/*
-	 * q->cmd_size: sizeof(struct scsi_cmd) + shost->hostt->cmd_size
-	 */
 	for (i = 0; i < qd; i++) {
 		map_req = hpb->map_req + i;
 		INIT_LIST_HEAD(&map_req->list_req);
-		map_req->req = kzalloc(sizeof(struct request) + q->cmd_size,
-				       GFP_KERNEL);
-		if (!map_req->req) {
-			for (j = 0; j < i; j++) {
-				kfree(hpb->map_req[j].req);
-				bio_put(hpb->map_req[j].bio);
-			}
-			goto release_mem;
-		}
 
 		map_req->bio = bio_kmalloc(GFP_KERNEL, hpb->mpages_per_srgn);
 		if (!map_req->bio) {
-			kfree(hpb->map_req[i].req);
-			for (j = 0; j < i; j++) {
-				kfree(hpb->map_req[j].req);
+			for (j = 0; j < i; j++)
 				bio_put(hpb->map_req[j].bio);
-			}
 			goto release_mem;
 		}
 		list_add_tail(&map_req->list_req, &hpb->lh_map_req_free);
@@ -2613,6 +2577,13 @@ static int ufshpb_pre_req_mempool_init(struct ufshpb_lu *hpb)
 
 	sdev = hpb->ufsf->sdev_ufs_lu[hpb->lun];
 	q = sdev->request_queue;
+
+	if (q->mq_ops) {
+		INFO_MSG("blk-mq queue: HPB pre-request disabled on lu (%d)",
+			 hpb->lun);
+		hpb->pre_req = NULL;
+		return 0;
+	}
 
 	hpb->pre_req = kzalloc(sizeof(struct ufshpb_req) * qd, GFP_KERNEL);
 	if (!hpb->pre_req)
