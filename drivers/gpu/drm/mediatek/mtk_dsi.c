@@ -1982,6 +1982,29 @@ static int mtk_preconfig_dsi_enable(struct mtk_dsi *dsi)
 	return 0;
 }
 
+#if defined(CONFIG_DRM_PANEL_K16_38_0C_0A_DSC_VDO) || defined(CONFIG_DRM_PANEL_K16_38_0E_0B_DSC_VDO)
+/* The display HAL reports the doze state ~5 ms after the DSI enable */
+#define MI_DOZE_STATE_WATCHDOG_MS	1000
+
+static void mtk_dsi_doze_state_watchdog_work(struct work_struct *work)
+{
+	struct mtk_dsi *dsi = container_of(to_delayed_work(work),
+					   struct mtk_dsi, doze_state_watchdog);
+	struct mi_disp_notifier notify_data;
+	int blank = dsi->doze_state_watchdog_blank;
+
+	if (atomic_read(&dsi->doze_state_reports) !=
+	    dsi->doze_state_watchdog_reports)
+		return;
+
+	pr_info("%s: no doze state from display HAL, notify DPMS %d\n",
+		__func__, blank);
+	notify_data.data = &blank;
+	notify_data.disp_id = MI_DISPLAY_PRIMARY;
+	mi_disp_notifier_call_chain(MI_DISP_DPMS_EVENT, &notify_data);
+}
+#endif
+
 static void mtk_output_dsi_enable(struct mtk_dsi *dsi,
 	int force_lcm_update)
 {
@@ -2002,6 +2025,7 @@ static void mtk_output_dsi_enable(struct mtk_dsi *dsi,
 	event.length = sizeof(blank);
 #else
 	int doze_brightness = DOZE_TO_NORMAL;
+	int doze_state_reports = atomic_read(&dsi->doze_state_reports);
 #endif
 	dsi->mi_cfg.crc_state = CRC_MODE_MAX;
 	dsi->mi_cfg.gir_state = GIR_MODE_MAX;
@@ -2220,9 +2244,24 @@ static void mtk_output_dsi_enable(struct mtk_dsi *dsi,
 		blank = MI_DISP_DPMS_LP1;
 	else
 		blank = MI_DISP_DPMS_ON;
-	g_notify_data.data = &blank;
-	g_notify_data.disp_id = MI_DISPLAY_PRIMARY;
-	mi_disp_notifier_call_chain(MI_DISP_DPMS_EVENT, &g_notify_data);
+	/* On a vdo doze panel CRTC_PROP_DOZE_ACTIVE is never set, so
+	 * new_doze_state cannot tell screen on from AOD here, and announcing
+	 * ON on AOD entry would resume the touch panel out of gesture mode.
+	 * Once the display HAL has been seen reporting DISP_FEATURE_DOZE_STATE
+	 * leave the event to it, and only announce it ourselves if the HAL
+	 * stays silent. Without such a HAL we are the only source of it.
+	 */
+	if (ext && ext->params && ext->params->vdo_doze_enable &&
+	    doze_state_reports) {
+		dsi->doze_state_watchdog_blank = blank;
+		dsi->doze_state_watchdog_reports = doze_state_reports;
+		mod_delayed_work(system_wq, &dsi->doze_state_watchdog,
+				 msecs_to_jiffies(MI_DOZE_STATE_WATCHDOG_MS));
+	} else {
+		g_notify_data.data = &blank;
+		g_notify_data.disp_id = MI_DISPLAY_PRIMARY;
+		mi_disp_notifier_call_chain(MI_DISP_DPMS_EVENT, &g_notify_data);
+	}
 #endif
 
 	DDPMSG("%s -\n", __func__);
@@ -2374,6 +2413,12 @@ static void mtk_output_dsi_disable(struct mtk_dsi *dsi,
 #endif
 	mtk_drm_crtc_wait_blank(mtk_crtc);
 
+#if defined(CONFIG_DRM_PANEL_K16_38_0C_0A_DSC_VDO) || defined(CONFIG_DRM_PANEL_K16_38_0E_0B_DSC_VDO)
+	/* A late fallback DPMS event must not resume the touch panel after
+	 * it has been suspended below.
+	 */
+	cancel_delayed_work_sync(&dsi->doze_state_watchdog);
+#endif
 	mi_disp_notifier_call_chain(MI_DISP_DPMS_EARLY_EVENT, &g_notify_data);
 
 	/* 1. If not doze mode, turn off backlight */
@@ -6977,6 +7022,8 @@ static int mtk_dsi_probe(struct platform_device *pdev)
 					      "mediatek,dual-dsi-slave");
 #else
 	init_completion(&dsi->bl_wait_completion);
+	INIT_DELAYED_WORK(&dsi->doze_state_watchdog,
+			  mtk_dsi_doze_state_watchdog_work);
 	dsi->mi_cfg.crc_state = CRC_MODE_MAX;
 	dsi->mi_cfg.bl_enable = true;
 	dsi->mi_cfg.bl_wait_frame = true;

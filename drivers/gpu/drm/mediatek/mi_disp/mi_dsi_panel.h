@@ -255,6 +255,11 @@ struct mtk_dsi {
 	bool doze_flag;
 #if defined (CONFIG_DRM_PANEL_K16_38_0C_0A_DSC_VDO) || defined (CONFIG_DRM_PANEL_K16_38_0E_0B_DSC_VDO)
 	struct completion bl_wait_completion;
+
+	atomic_t doze_state_reports;
+	struct delayed_work doze_state_watchdog;
+	int doze_state_watchdog_reports;
+	int doze_state_watchdog_blank;
 #endif
 
 	unsigned int data_phy_cycle;

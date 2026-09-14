@@ -2136,6 +2136,7 @@ int mi_dsi_panel_set_disp_param(struct mtk_dsi *dsi, struct disp_feature_ctl *ct
 			g_notify_data.disp_id = MI_DISPLAY_PRIMARY;
 			mi_disp_notifier_call_chain(notifier_event, &g_notify_data);
 			mi_cfg->feature_val[DISP_FEATURE_DOZE_STATE] = ctl->feature_val;
+			atomic_inc(&dsi->doze_state_reports);
 		} else
 			DISP_ERROR("invaild doze state %d\n", ctl->feature_val);
 		break;
