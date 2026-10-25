@@ -22,6 +22,7 @@
 #include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/sched/clock.h>
+#include <linux/sched/hengyu.h>
 
 #include <linux/uaccess.h>
 
@@ -690,6 +691,7 @@ void fpsgo_clear(void)
 	struct render_info *iter;
 
 	fpsgo_render_tree_lock(__func__);
+	hengyu_frame_reset();
 
 	n = rb_first(&render_pid_tree);
 	while (n) {

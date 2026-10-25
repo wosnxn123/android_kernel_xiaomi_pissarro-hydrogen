@@ -25,9 +25,6 @@
 static struct cpufreq_governor schedutil_gov;
 unsigned long boosted_cpu_util(int cpu);
 
-void (*cpufreq_notifier_fp)(int cluster_id, unsigned long freq);
-EXPORT_SYMBOL(cpufreq_notifier_fp);
-
 #define SUGOV_KTHREAD_PRIORITY	50
 
 struct sugov_tunables {
@@ -596,8 +593,10 @@ int schedutil_set_down_rate_limit_us(int cpu, unsigned int rate_limit_us)
 	if (!policy)
 		return -EINVAL;
 
-	if (policy->governor != &schedutil_gov)
+	if (policy->governor != &schedutil_gov) {
+		cpufreq_cpu_put(policy);
 		return -ENOENT;
+	}
 
 	mutex_lock(&global_tunables_lock);
 	sg_policy = policy->governor_data;
@@ -636,8 +635,10 @@ int schedutil_set_up_rate_limit_us(int cpu, unsigned int rate_limit_us)
 	if (!policy)
 		return -EINVAL;
 
-	if (policy->governor != &schedutil_gov)
+	if (policy->governor != &schedutil_gov) {
+		cpufreq_cpu_put(policy);
 		return -ENOENT;
+	}
 
 	mutex_lock(&global_tunables_lock);
 	sg_policy = policy->governor_data;

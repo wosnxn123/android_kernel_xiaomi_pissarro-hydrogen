@@ -431,6 +431,117 @@ switches and similar is less significant, and it uses the scheduler's own CPU
 utilization metric, so in principle its decisions should not contradict the
 decisions made by the other parts of the scheduler.
 
+``hengyu``
+----------
+
+Hengyu is a scheduler-driven CPU governor with bounded workload prediction and
+optional FPSGO frame feedback.  It reuses this kernel's PELT/WALT, utilization
+estimation, RT accounting and schedtune utilization signal.  It does not replace
+the scheduler, move tasks, control GPU clocks or change application quality.
+
+The governor measures changes in CPU demand at intervals of at least 2 ms, using
+existing scheduler callbacks rather than a polling timer.  Stable demand uses a
+small proportional headroom; rising or variable demand can use a larger, bounded
+headroom and a short peak hold.  History older than 32 ms is reinitialized.  The
+default headroom range is 5--25 percent of utilization, not of CPU frequency.
+
+For shared policies, the largest demand-to-capacity ratio wins; CPU demands are
+not added together.  Empty runqueues do not contribute demand or hints, except
+for the CPU receiving an explicit pre-enqueue I/O-wait wakeup notification.
+I/O-wait hints start at one eighth of CPU capacity and can
+grow to one half, then decay when consumed or expire after a scheduler tick
+without a fresh update.  All predictive, frame and I/O additions are applied
+before utilization clamping.  Deadline requests select the policy maximum;
+neither deadline requests nor other hints override policy or firmware limits.
+
+When FPSGO is enabled, completed-frame CPU runtime, the frame budget and the
+renderer/dependency CPU mask supply expiring per-CPU pressure.  Multiple renderers
+are merged by maximum, not by addition.  Low CPU runtime with a long queue-to-queue
+interval is not by itself a reason to boost the CPU.  Frame pressure and workload
+headroom are merged rather than stacked, and the configured maximum headroom
+still applies.  Existing FPSGO task utilization clamps, memory-bandwidth requests
+and thermal policies remain in place.  Its schedutil-specific rate controls do
+not change Hengyu's rate controls.
+
+Feedback has 64 records keyed by renderer PID, buffer and task lifetime; a full
+table drops new records rather than evicting live renderers.  A hint lives for
+three target frames, capped at 100 ms.  Targets outside 1--100 ms, invalid samples
+and frames using less than 75 percent of Q2Q for CPU work clear their hint.
+Pressure starts above 75 percent of the target, reaches Q10 value 128 at the
+target and saturates at 256 at 125 percent of the target.
+
+The producer samples actual placement of the renderer and up to 30 dependencies
+through a bounded, read-only XGF snapshot, without dynamic allocation.  It does
+not boost every CPU in a task's allowed affinity mask.  Migration between
+samples and bounded snapshot truncation can reduce coverage.  Scheduler queries
+read only the per-CPU cache; when its dominant hint expires they return zero
+until the next producer rebuild, even if a weaker record is still live.
+
+
+On MT6877 with the MediaTek CPU-frequency driver and MCUPM support, Hengyu uses
+the existing asynchronous WFI DVFS provider.  That provider retains ownership of
+architecture frequency scaling, CM-manager sampling and CPU-frequency tracing.
+SSPM support alone does not enable this path.  Other configurations use the
+normal driver's fast-switch or serialized worker interface.  Frequency-table
+selection never rounds above the policy maximum; if no legal OPP exists, the
+request is rejected.  Firmware requests and ``scaling_cur_freq`` on this path
+are not hardware acknowledgements or independently measured clocks.
+
+Enable ``CONFIG_CPU_FREQ_GOV_HENGYU`` to make the governor available, or select
+``CONFIG_CPU_FREQ_DEFAULT_GOV_HENGYU`` as the default.  The pissarro, pissarro_debug
+and pissarro_stability defconfigs select this default and retain schedutil as an
+alternative.  With an installed kernel providing the governor, a privileged
+user can select it for each policy::
+
+    for policy in /sys/devices/system/cpu/cpufreq/policy*; do
+        echo hengyu > "$policy/scaling_governor"
+    done
+
+Check ``scaling_available_governors`` before selecting it.  Android's power HAL
+or boot scripts may subsequently choose another governor.  Writing ``schedutil``
+instead selects the retained alternative; no userspace application is required
+for Hengyu's basic workload control.
+
+Tunables appear in ``policyX/hengyu/`` when per-policy governor attributes are
+enabled, or in the common ``cpufreq/hengyu/`` directory otherwise:
+
+``up_rate_limit_us``
+	Normal minimum interval before an upward request, in microseconds.
+	Default: 500; accepted range: 0--1000000.
+
+``down_rate_limit_us``
+	Normal minimum interval before a downward request, in microseconds.
+	Default: 4000; accepted range: 0--1000000.  Both rate settings are
+	raised to at least the driver's recommended transition delay.  Limit
+	changes and an entirely idle policy bypass rate limiting; RT/deadline
+	updates may bypass the upward interval.  A driver that forbids remote
+	fast switching applies a remote limit change on its next local update.
+
+``min_headroom_pct``
+	Baseline proportional utilization headroom.  Default: 5.  Must be
+	between zero and ``max_headroom_pct``.
+
+``max_headroom_pct``
+	Ceiling for adaptive and frame headroom.  Default: 25.  Must be between
+	``min_headroom_pct`` and 50.  This does not limit explicit task clamps
+	or the separate, bounded I/O-wait hint.
+
+``burst_hold_us``
+	Lifetime of a predicted peak after a cold start or a substantial rise.
+	Default: 8000; accepted range: 0--32000.  Zero disables peak holding.
+	Held demand remains bounded by current demand plus maximum headroom;
+	this setting never holds an idle CPU at a frequency floor.
+
+``frame_feedback``
+	Boolean controlling consumption of FPSGO frame pressure.  Defaults to
+	one when FPSGO v3 is built, otherwise zero.  Disabling it leaves the
+	scheduler-driven algorithm active and does not disable FPSGO itself.
+
+These defaults are an initial control policy, not a guarantee of lower energy
+consumption, higher frame rates or real-time deadlines.  Compare equal workloads,
+quality settings and thermal conditions before choosing device-specific values.
+
+
 ``ondemand``
 ------------
 

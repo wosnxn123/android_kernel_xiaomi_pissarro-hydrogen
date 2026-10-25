@@ -13,6 +13,8 @@
 #define SCHED_CPUFREQ_IOWAIT	(1U << 2)
 
 #ifdef CONFIG_CPU_FREQ
+extern void (*cpufreq_notifier_fp)(int cluster_id, unsigned long freq);
+
 struct update_util_data {
        void (*func)(struct update_util_data *data, u64 time, unsigned int flags);
 };

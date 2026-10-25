@@ -28,7 +28,7 @@ void fpsgo_ctrl2fbt_dfrc_fps(int fps_limit);
 void fpsgo_ctrl2fbt_cpufreq_cb(int cid, unsigned long freq);
 void fpsgo_ctrl2fbt_vsync(unsigned long long ts);
 void fpsgo_comp2fbt_frame_start(struct render_info *thr,
-		unsigned long long ts);
+		unsigned long long ts, unsigned long long frame_runtime);
 void fpsgo_comp2fbt_deq_end(struct render_info *thr,
 		unsigned long long ts);
 
@@ -38,7 +38,7 @@ void fpsgo_base2fbt_item_del(struct fbt_thread_loading *obj,
 		struct fpsgo_loading *pdep,
 		struct render_info *thr);
 int fpsgo_base2fbt_get_max_blc_pid(int *pid, unsigned long long *buffer_id);
-void fpsgo_comp2fbt_bypass_enq(void);
+void fpsgo_comp2fbt_bypass_enq(struct render_info *thr);
 void fpsgo_comp2fbt_bypass_disconnect(void);
 void fpsgo_base2fbt_set_bypass(int has_bypass);
 void fpsgo_base2fbt_check_max_blc(void);
@@ -64,7 +64,7 @@ static inline void fpsgo_ctrl2fbt_cpufreq_cb(int cid,
 		unsigned long freq) { }
 static inline void fpsgo_ctrl2fbt_vsync(unsigned long long ts) { }
 static inline void fpsgo_comp2fbt_frame_start(struct render_info *thr,
-	unsigned long long ts) { }
+	unsigned long long ts, unsigned long long frame_runtime) { }
 static inline void fpsgo_comp2fbt_deq_end(struct render_info *thr,
 		unsigned long long ts) { }
 
@@ -80,7 +80,7 @@ static inline void fpsgo_base2fbt_item_del(
 		struct render_info *thr) { }
 static inline int fpsgo_base2fbt_get_max_blc_pid(int *pid,
 		unsigned long long *buffer_id) { return 0; }
-static inline void fpsgo_comp2fbt_bypass_enq(void) { }
+static inline void fpsgo_comp2fbt_bypass_enq(struct render_info *thr) { }
 static inline void fpsgo_comp2fbt_bypass_disconnect(void) { }
 static inline void fpsgo_base2fbt_set_bypass(int has_bypass) { }
 static inline void fpsgo_base2fbt_check_max_blc(void) { }

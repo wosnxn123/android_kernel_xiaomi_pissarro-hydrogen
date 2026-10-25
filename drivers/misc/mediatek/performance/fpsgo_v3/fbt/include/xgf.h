@@ -283,6 +283,10 @@ int fpsgo_ctrl2xgf_nn_job_end(unsigned int tid, unsigned long long mid);
 int fpsgo_comp2xgf_qudeq_notify(int rpid, unsigned long long bufID, int cmd,
 	unsigned long long *run_time, unsigned long long *mid,
 	unsigned long long ts);
+#ifdef CONFIG_CPU_FREQ_GOV_HENGYU
+int fpsgo_fbt2xgf_get_dep_list_snapshot(int pid, int count,
+		int *arr, unsigned long long bufID);
+#endif
 void fpsgo_fstb2xgf_do_recycle(int fstb_active);
 void fpsgo_create_render_dep(void);
 int has_xgf_dep(pid_t tid);

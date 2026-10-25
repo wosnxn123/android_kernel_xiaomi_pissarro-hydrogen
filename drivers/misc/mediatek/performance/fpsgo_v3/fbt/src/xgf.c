@@ -25,6 +25,7 @@
 #include <linux/sched/clock.h>
 #include <linux/cpumask.h>
 #include <linux/sched/task.h>
+#include <linux/sched/hengyu.h>
 #include <linux/sched/cputime.h>
 #include <linux/bitops.h>
 
@@ -1751,12 +1752,103 @@ int fpsgo_fbt2xgf_get_dep_list(int pid, int count,
 	return index;
 }
 
+#ifdef CONFIG_CPU_FREQ_GOV_HENGYU
+#define XGF_FRAME_DEP_MAX 30
+#define XGF_FRAME_RENDER_SCAN_MAX 64
+#define XGF_FRAME_DEP_SCAN_MAX 128
+
+static void xgf_frame_add_dep(int *arr, int count, int *size, int pid)
+{
+	int i;
+
+	if (pid <= 0 || *size >= count)
+		return;
+	for (i = 0; i < *size; i++) {
+		if (arr[i] == pid)
+			return;
+	}
+	arr[(*size)++] = pid;
+}
+
+/*
+ * Unlike the boost dependency getters, this snapshot never inserts XGF
+ * dependencies. Bounded truncation only drops coverage; shared tasks may be
+ * included by several renderers because hengyu merges their pressure by max.
+ */
+int fpsgo_fbt2xgf_get_dep_list_snapshot(int pid, int count,
+		int *arr, unsigned long long bufID)
+{
+	struct xgf_render *iter, *render = NULL;
+	struct xgf_spid *spid;
+	struct rb_node *out, *prev;
+	int size = 0, scans = 0;
+
+	if (pid <= 0 || count <= 0 || !arr)
+		return 0;
+	count = min(count, XGF_FRAME_DEP_MAX);
+	xgf_lock(__func__);
+	if (!xgf_is_enable())
+		goto unlock;
+	hlist_for_each_entry(iter, &xgf_renders, hlist) {
+		if (scans++ >= XGF_FRAME_RENDER_SCAN_MAX)
+			break;
+		if (iter->render == pid && iter->bufID == bufID) {
+			render = iter;
+			break;
+		}
+	}
+	if (!render)
+		goto unlock;
+
+	if (xgf_uboost && xgf_uboost_case(render))
+		xgf_frame_add_dep(arr, count, &size, render->parent);
+	xgf_frame_add_dep(arr, count, &size, render->spid);
+	out = rb_first(&render->out_deps_list);
+	prev = rb_first(&render->prev_deps_list);
+	for (scans = 0; (out || prev) && size < count &&
+	     scans < XGF_FRAME_DEP_SCAN_MAX; scans++) {
+		struct xgf_dep *out_dep = out ?
+			rb_entry(out, struct xgf_dep, rb_node) : NULL;
+		struct xgf_dep *prev_dep = prev ?
+			rb_entry(prev, struct xgf_dep, rb_node) : NULL;
+
+		if (!prev_dep || (out_dep && out_dep->tid < prev_dep->tid)) {
+			if (out_dep->render_dep)
+				xgf_frame_add_dep(arr, count, &size, out_dep->tid);
+			out = rb_next(out);
+		} else if (!out_dep || prev_dep->tid < out_dep->tid) {
+			if (prev_dep->render_dep)
+				xgf_frame_add_dep(arr, count, &size, prev_dep->tid);
+			prev = rb_next(prev);
+		} else {
+			if (out_dep->render_dep || prev_dep->render_dep)
+				xgf_frame_add_dep(arr, count, &size, out_dep->tid);
+			out = rb_next(out);
+			prev = rb_next(prev);
+		}
+	}
+	if (xgf_cfg_spid) {
+		scans = 0;
+		hlist_for_each_entry(spid, &xgf_wspid_list, hlist) {
+			if (size >= count || scans++ >= XGF_FRAME_DEP_SCAN_MAX)
+				break;
+			if (spid->rpid == pid && spid->bufID == bufID)
+				xgf_frame_add_dep(arr, count, &size, spid->tid);
+		}
+	}
+unlock:
+	xgf_unlock(__func__);
+	return size;
+}
+#endif
+
 void xgf_reset_renders(void)
 {
 	struct xgf_render *r_iter;
 	struct hlist_node *r_tmp;
 
 	xgf_lockprove(__func__);
+	hengyu_frame_reset();
 
 	hlist_for_each_entry_safe(r_iter, r_tmp, &xgf_renders, hlist) {
 		xgf_clean_deps_list(r_iter, INNER_DEPS);

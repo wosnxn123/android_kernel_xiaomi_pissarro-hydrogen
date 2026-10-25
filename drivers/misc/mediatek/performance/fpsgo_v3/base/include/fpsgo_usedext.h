@@ -17,7 +17,7 @@
 #ifndef __FPSGO_USEDEXT_H__
 #define __FPSGO_USEDEXT_H__
 
-extern void (*cpufreq_notifier_fp)(int cid, unsigned long freq);
+#include <linux/sched/cpufreq.h>
 extern void (*fpsgo_notify_qudeq_fp)(int qudeq, unsigned int startend,
 		int pid, unsigned long long identifier);
 extern void (*fpsgo_notify_connect_fp)(int pid, int connectedAPI,

@@ -13,6 +13,9 @@
 
 DEFINE_PER_CPU(struct update_util_data *, cpufreq_update_util_data);
 
+void (*cpufreq_notifier_fp)(int cluster_id, unsigned long freq);
+EXPORT_SYMBOL(cpufreq_notifier_fp);
+
 /**
  * cpufreq_add_update_util_hook - Populate the CPU's update_util_data pointer.
  * @cpu: The CPU to set the pointer for.

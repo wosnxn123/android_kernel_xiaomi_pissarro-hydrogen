@@ -29,5 +29,6 @@ obj-$(CONFIG_SCHED_TUNE) += tune.o
 obj-$(CONFIG_CGROUP_CPUACCT) += cpuacct.o
 obj-$(CONFIG_CPU_FREQ) += cpufreq.o
 obj-$(CONFIG_CPU_FREQ_GOV_SCHEDUTIL) += cpufreq_schedutil.o
+obj-$(CONFIG_CPU_FREQ_GOV_HENGYU) += cpufreq_hengyu.o cpufreq_hengyu_feedback.o
 obj-$(CONFIG_MEMBARRIER) += membarrier.o
 obj-$(CONFIG_PSI) += psi.o

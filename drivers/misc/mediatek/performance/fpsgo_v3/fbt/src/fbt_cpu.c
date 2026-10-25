@@ -47,6 +47,7 @@
 #include <linux/sched/deadline.h>
 #include <linux/bsearch.h>
 #include <linux/sched/task.h>
+#include <linux/sched/hengyu.h>
 #include <linux/sched/topology.h>
 #include <sched/sched.h>
 #include <linux/list_sort.h>
@@ -3336,6 +3337,8 @@ static void fbt_reset_boost(struct render_info *thr)
 	if (!thr)
 		return;
 
+	hengyu_frame_remove(thr->pid, thr->buffer_id);
+
 	mutex_lock(&blc_mlock);
 	if (thr->p_blc)
 		thr->p_blc->blc = 0;
@@ -3362,7 +3365,67 @@ static void fbt_reset_boost(struct render_info *thr)
 	fpsgo_systrace_c_fbt(thr->pid, thr->buffer_id, 0, "perf idx");
 }
 
-static void fbt_frame_start(struct render_info *thr, unsigned long long ts)
+#ifdef CONFIG_CPU_FREQ_GOV_HENGYU
+/* Caller holds RCU; sample placement, never broaden to all allowed CPUs. */
+static void fbt_hengyu_add_cpu(struct cpumask *cpus, int pid)
+{
+	struct task_struct *task;
+	int cpu;
+
+	if (pid <= 0)
+		return;
+	task = find_task_by_vpid(pid);
+	if (!task || (READ_ONCE(task->flags) & (PF_KTHREAD | PF_EXITING)) ||
+	    rt_task(task) || dl_task(task))
+		return;
+	cpu = task_cpu(task);
+	if (cpu < nr_cpu_ids && cpu_online(cpu))
+		cpumask_set_cpu(cpu, cpus);
+}
+#endif
+
+static void fbt_hengyu_frame(struct render_info *thr, u64 runtime_ns,
+		int targetfps, int targettime)
+{
+#ifdef CONFIG_CPU_FREQ_GOV_HENGYU
+	int deps[MAX_DEP_NUM];
+	cpumask_t cpus;
+	int count, i;
+
+	if (!runtime_ns || targetfps <= 0 ||
+	    targetfps > TARGET_UNLIMITED_FPS || targettime <= 0 ||
+	    thr->frame_type == BY_PASS_TYPE || !thr->buffer_id || thr->linger) {
+		hengyu_frame_remove(thr->pid, thr->buffer_id);
+		return;
+	}
+
+	/*
+	 * The ordinary XGF boost getters may allocate and mutate dependency
+	 * state. This bounded snapshot works even when boost_ta skips dep_arr.
+	 */
+	count = fpsgo_fbt2xgf_get_dep_list_snapshot(thr->pid, MAX_DEP_NUM,
+			deps, thr->buffer_id);
+
+	cpumask_clear(&cpus);
+	rcu_read_lock();
+	fbt_hengyu_add_cpu(&cpus, thr->pid);
+	for (i = 0; i < count; i++)
+		fbt_hengyu_add_cpu(&cpus, deps[i]);
+	rcu_read_unlock();
+
+	/* Serialize late publication against FBT disable and global reset. */
+	mutex_lock(&fbt_mlock);
+	if (fbt_enable)
+		hengyu_frame_update(thr->pid, thr->buffer_id, &cpus,
+				runtime_ns, targettime, thr->Q2Q_time);
+	else
+		hengyu_frame_remove(thr->pid, thr->buffer_id);
+	mutex_unlock(&fbt_mlock);
+#endif
+}
+
+static void fbt_frame_start(struct render_info *thr, unsigned long long ts,
+		unsigned long long frame_runtime)
 {
 	struct fbt_boost_info *boost;
 	long long runtime;
@@ -3385,6 +3448,7 @@ static void fbt_frame_start(struct render_info *thr, unsigned long long ts)
 			&q_c_time, &q_g_time);
 	boost->quantile_cpu_time = q_c_time;
 	boost->quantile_gpu_time = q_g_time;
+	fbt_hengyu_frame(thr, frame_runtime, targetfps, targettime);
 	if (!targetfps)
 		targetfps = TARGET_UNLIMITED_FPS;
 
@@ -3592,18 +3656,21 @@ void fpsgo_ctrl2fbt_vsync(unsigned long long ts)
 }
 
 void fpsgo_comp2fbt_frame_start(struct render_info *thr,
-		unsigned long long ts)
+		unsigned long long ts, unsigned long long frame_runtime)
 {
 	if (!thr)
 		return;
 
-	if (!fbt_is_enable())
+	if (!fbt_is_enable()) {
+		hengyu_frame_remove(thr->pid, thr->buffer_id);
 		return;
+	}
 
 	fpsgo_systrace_c_fbt(thr->pid, thr->buffer_id,
 		thr->Q2Q_time, "q2q time");
 
 	if (!thr->running_time) {
+		hengyu_frame_remove(thr->pid, thr->buffer_id);
 		fpsgo_systrace_c_fbt(thr->pid, thr->buffer_id,
 			0, "zero running time");
 		return;
@@ -3615,7 +3682,7 @@ void fpsgo_comp2fbt_frame_start(struct render_info *thr,
 	fbt_set_sync_flag_locked(0);
 	mutex_unlock(&fbt_mlock);
 
-	fbt_frame_start(thr, ts);
+	fbt_frame_start(thr, ts, frame_runtime);
 }
 
 void fpsgo_comp2fbt_deq_end(struct render_info *thr,
@@ -3638,9 +3705,11 @@ void fpsgo_comp2fbt_deq_end(struct render_info *thr,
 	}
 }
 
-void fpsgo_comp2fbt_bypass_enq(void)
+void fpsgo_comp2fbt_bypass_enq(struct render_info *thr)
 {
 	mutex_lock(&fbt_mlock);
+	if (thr)
+		hengyu_frame_remove(thr->pid, thr->buffer_id);
 
 	if (!fbt_enable) {
 		mutex_unlock(&fbt_mlock);
@@ -3729,6 +3798,9 @@ void fpsgo_base2fbt_item_del(struct fbt_thread_loading *obj,
 {
 	unsigned long flags;
 
+	if (thr)
+		hengyu_frame_remove(thr->pid, thr->buffer_id);
+
 	if (!obj || !pblc)
 		return;
 
@@ -3787,6 +3859,7 @@ void fpsgo_base2fbt_no_one_render(void)
 	int clear_uclamp = 0;
 
 	mutex_lock(&fbt_mlock);
+	hengyu_frame_reset();
 
 	if (!fbt_enable) {
 		mutex_unlock(&fbt_mlock);
@@ -3823,6 +3896,7 @@ void fpsgo_base2fbt_only_bypass(void)
 	int clear_uclamp = 0;
 
 	mutex_lock(&fbt_mlock);
+	hengyu_frame_reset();
 
 	if (!fbt_enable) {
 		mutex_unlock(&fbt_mlock);
@@ -4171,6 +4245,8 @@ static void fbt_setting_exit(void)
 int fpsgo_ctrl2fbt_switch_fbt(int enable)
 {
 	mutex_lock(&fbt_mlock);
+	if (!enable)
+		hengyu_frame_reset();
 
 	if (fbt_enable == enable) {
 		mutex_unlock(&fbt_mlock);
@@ -5081,6 +5157,8 @@ static KOBJ_ATTR_RW(limit_rfreq_m);
 
 void __exit fbt_cpu_exit(void)
 {
+	fpsgo_ctrl2fbt_switch_fbt(0);
+
 	minitop_exit();
 	thrm_aware_exit();
 	fbt_reg_dram_request(0);

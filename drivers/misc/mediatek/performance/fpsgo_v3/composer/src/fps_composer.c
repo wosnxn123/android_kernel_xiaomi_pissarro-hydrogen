@@ -24,6 +24,7 @@
 #include <linux/version.h>
 #include <linux/mutex.h>
 #include <linux/sched/task.h>
+#include <linux/sched/hengyu.h>
 
 #include <fpsgo_common.h>
 
@@ -162,6 +163,8 @@ int fpsgo_com_update_render_api_info(struct render_info *f_render)
 		connect_api->buffer_id);
 	new_type = fpsgo_com_check_frame_type(f_render->api,
 			f_render->frame_type);
+	if (new_type == BY_PASS_TYPE)
+		hengyu_frame_remove(f_render->pid, f_render->buffer_id);
 	f_render->frame_type = new_type;
 	return 1;
 }
@@ -182,6 +185,7 @@ static int fpsgo_com_refetch_buffer(struct render_info *f_render, int pid,
 	ret = fpsgo_get_BQid_pair(pid, f_render->tgid,
 		identifier, &buffer_id, &queue_SF, enqueue);
 	if (!ret || !buffer_id) {
+		hengyu_frame_remove(f_render->pid, f_render->buffer_id);
 		FPSGO_LOGI("refetch %d: %llu, %d, %llu\n",
 			pid, buffer_id, queue_SF, identifier);
 		fpsgo_main_trace("COMP: refetch %d: %llu, %d, %llu\n",
@@ -189,6 +193,8 @@ static int fpsgo_com_refetch_buffer(struct render_info *f_render, int pid,
 		return 0;
 	}
 
+	if (f_render->buffer_id != buffer_id || !queue_SF)
+		hengyu_frame_remove(f_render->pid, f_render->buffer_id);
 	f_render->buffer_id = buffer_id;
 	f_render->queue_SF = queue_SF;
 	if (!f_render->pLoading || !f_render->p_blc) {
@@ -279,7 +285,7 @@ void fpsgo_ctrl2comp_enqueue_start(int pid,
 		break;
 	case BY_PASS_TYPE:
 		f_render->t_enqueue_start = enqueue_start_time;
-		fpsgo_comp2fbt_bypass_enq();
+		fpsgo_comp2fbt_bypass_enq(f_render);
 		fpsgo_systrace_c_fbt_gm(-100, 0, 0, "%d-frame_time", pid);
 		break;
 	default:
@@ -366,8 +372,9 @@ void fpsgo_ctrl2comp_enqueue_end(int pid,
 			f_render->running_time = running_time;
 		f_render->mid = mid;
 
-		fpsgo_comp2fbt_frame_start(f_render,
-				enqueue_end_time);
+		fpsgo_comp2fbt_frame_start(f_render, enqueue_end_time,
+			(xgf_ret == XGF_NOTIFY_OK || xgf_ret == XGF_SLPTIME_OK) ?
+			running_time : 0);
 		fpsgo_comp2fstb_queue_time_update(pid,
 			f_render->buffer_id,
 			f_render->frame_type,
