@@ -1,0 +1,163 @@
+name: Build Hydrogen Kernel
+
+on:
+  push:
+    branches:
+      - lineage-23.2
+    paths-ignore:
+      - 'Documentation/**'
+      - '**/*.md'
+  pull_request:
+    branches:
+      - lineage-23.2
+    paths-ignore:
+      - 'Documentation/**'
+      - '**/*.md'
+  workflow_dispatch:
+    inputs:
+      device:
+        description: Kernel configuration
+        required: true
+        default: pissarro
+        type: choice
+        options:
+          - pissarro
+          - pissarro_debug
+          - pissarro_stability
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.device || 'pissarro' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ inputs.device || 'pissarro' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVICE: ${{ inputs.device || 'pissarro' }}
+      # Keep these in sync with build.sh.
+      CLANG_VERSION: clang-r563880c
+      CLANG_TAG: android-16.0.0_r4
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_COMPILERCHECK: content
+      CCACHE_MAXSIZE: 3G
+      KBUILD_BUILD_USER: github-actions
+      KBUILD_BUILD_HOST: hydrogen-ci
+
+    steps:
+      - name: Checkout kernel
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates ccache curl flex \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi \
+            libelf-dev libncurses-dev libssl-dev libtinfo5 \
+            lz4 python3 python-is-python3 rsync unzip xz-utils zip zstd
+
+      - name: Restore AOSP Clang
+        id: clang-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/toolchains/${{ env.CLANG_VERSION }}
+          key: aosp-clang-${{ runner.os }}-${{ runner.arch }}-${{ env.CLANG_TAG }}-${{ env.CLANG_VERSION }}-v1
+
+      - name: Download AOSP Clang
+        if: steps.clang-cache.outputs.cache-hit != 'true'
+        run: |
+          download_dir=$(mktemp -d "${RUNNER_TEMP}/clang-download.XXXXXX")
+          toolchain_dir="$HOME/toolchains/$CLANG_VERSION"
+          mkdir -p "$HOME/toolchains"
+          mkdir "$toolchain_dir"
+          curl --fail --location --retry 5 --retry-delay 10 \
+            --output "$download_dir/clang.tar.gz" \
+            "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/tags/${CLANG_TAG}/${CLANG_VERSION}.tar.gz"
+          tar --extract --gzip --no-same-owner \
+            --file "$download_dir/clang.tar.gz" --directory "$toolchain_dir"
+
+      - name: Verify toolchain
+        run: |
+          "$HOME/toolchains/$CLANG_VERSION/bin/clang" --version
+          "$HOME/toolchains/$CLANG_VERSION/bin/ld.lld" --version
+          test -s "arch/arm64/configs/${DEVICE}_defconfig"
+          test -s prebuilts/dtb.img
+          test -s prebuilts/dtbo.img
+
+      - name: Restore compiler cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ccache-${{ runner.os }}-${{ runner.arch }}-${{ env.CLANG_VERSION }}-${{ env.DEVICE }}-${{ hashFiles('build.sh', 'arch/arm64/configs/pissarro*defconfig') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ runner.arch }}-${{ env.CLANG_VERSION }}-${{ env.DEVICE }}-${{ hashFiles('build.sh', 'arch/arm64/configs/pissarro*defconfig') }}-
+            ccache-${{ runner.os }}-${{ runner.arch }}-${{ env.CLANG_VERSION }}-${{ env.DEVICE }}-
+
+      - name: Build kernel and AnyKernel3 installer
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+        run: |
+          ccache --zero-stats
+          bash build.sh "$DEVICE" 2>&1 | tee "${RUNNER_TEMP}/build.log"
+          test -s out/arch/arm64/boot/Image.gz
+          packages=(HydrogenKernel-*.zip)
+          test -s "${packages[0]}"
+          sha256sum "${packages[@]}" out/arch/arm64/boot/Image.gz > SHA256SUMS
+
+      - name: Upload kernel and installer
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: HydrogenKernel-${{ env.DEVICE }}-${{ github.run_number }}
+          path: |
+            HydrogenKernel-*.zip
+            out/arch/arm64/boot/Image.gz
+            SHA256SUMS
+          compression-level: 0
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Show compiler cache statistics
+        if: always()
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            ccache --show-stats
+          fi
+
+      - name: Collect build diagnostics
+        if: always()
+        run: |
+          diagnostics="${RUNNER_TEMP}/kernel-diagnostics"
+          mkdir -p "$diagnostics"
+          printf 'Commit: %s\nConfiguration: %s_defconfig\nToolchain: %s (%s)\n' \
+            "$GITHUB_SHA" "$DEVICE" "$CLANG_VERSION" "$CLANG_TAG" \
+            > "$diagnostics/build-info.txt"
+          if [ -f "${RUNNER_TEMP}/build.log" ]; then
+            cp "${RUNNER_TEMP}/build.log" "$diagnostics/"
+          fi
+          if [ -f out/.config ]; then
+            cp out/.config "$diagnostics/kernel.config"
+          fi
+          if [ -f out/System.map ]; then
+            cp out/System.map "$diagnostics/"
+          fi
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: build-diagnostics-${{ env.DEVICE }}-${{ github.run_number }}
+          path: ${{ runner.temp }}/kernel-diagnostics/
+          if-no-files-found: warn
+          retention-days: 14
